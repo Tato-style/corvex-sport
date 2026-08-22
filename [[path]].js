@@ -237,7 +237,7 @@ export async function onRequest(context) {
         await env.DB.prepare('UPDATE users SET username=?,display_name=?,role=?,is_active=? WHERE id=?')
           .bind(username,displayName,role,active,id).run();
       }
-      await env.DB.prepare('DELETE FROM sessions WHERE user_id=? AND is_active=0').bind(id).run().catch(()=>{});
+      if (active === 0) await env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(id).run();
       return json({ok:true});
     }
 
