@@ -169,6 +169,36 @@ export async function onRequest(context) {
       return json({order});
     }
 
+    const printedMatch = path.match(/^\/orders\/(\d+)\/printed$/);
+    if (printedMatch && method === 'PUT') {
+      const b = await readBody(request);
+      const printed = Number(b.printed) === 1 ? 1 : 0;
+      const id = Number(printedMatch[1]);
+      const existing = await env.DB.prepare('SELECT id FROM orders WHERE id=?').bind(id).first();
+      if (!existing) return json({error:'الطلب غير موجود'},404);
+      await env.DB.prepare(`UPDATE orders SET printed=?, updated_at=datetime('now'),
+        first_printed_at=CASE WHEN ?=1 THEN COALESCE(first_printed_at,datetime('now')) ELSE first_printed_at END,
+        last_printed_at=CASE WHEN ?=1 THEN datetime('now') ELSE last_printed_at END
+        WHERE id=?`).bind(printed,printed,printed,id).run();
+      const order = await env.DB.prepare(orderSelectSql('WHERE o.id=?')).bind(id).first();
+      return json({order});
+    }
+
+    if (orderMatch && method === 'DELETE') {
+      if (me.role !== 'admin') return json({error:'صلاحية مدير مطلوبة'},403);
+      const id = Number(orderMatch[1]);
+      const existing = await env.DB.prepare('SELECT id FROM orders WHERE id=?').bind(id).first();
+      if (!existing) return json({error:'الطلب غير موجود'},404);
+      const affected = await env.DB.prepare('SELECT DISTINCT batch_id FROM print_batch_orders WHERE order_id=?').bind(id).all();
+      await env.DB.prepare('DELETE FROM orders WHERE id=?').bind(id).run();
+      for (const row of (affected.results || [])) {
+        const count = await env.DB.prepare('SELECT COUNT(*) c FROM print_batch_orders WHERE batch_id=?').bind(row.batch_id).first();
+        if (Number(count?.c || 0) === 0) await env.DB.prepare('DELETE FROM print_batches WHERE id=?').bind(row.batch_id).run();
+        else await env.DB.prepare('UPDATE print_batches SET order_count=? WHERE id=?').bind(Number(count.c),row.batch_id).run();
+      }
+      return json({ok:true});
+    }
+
     if (path === '/users' && method === 'GET') {
       if (me.role !== 'admin') return json({error:'صلاحية مدير مطلوبة'},403);
       const rows = await env.DB.prepare('SELECT id,username,display_name,role,is_active,created_at FROM users ORDER BY id DESC').all();
@@ -182,6 +212,33 @@ export async function onRequest(context) {
       await env.DB.prepare('INSERT INTO users(username,display_name,password_hash,role) VALUES(?,?,?,?)')
         .bind(String(b.username).trim(),String(b.display_name).trim(),hash,b.role==='admin'?'admin':'staff').run();
       return json({ok:true},201);
+    }
+
+
+    const userMatch = path.match(/^\/users\/(\d+)$/);
+    if (userMatch && method === 'PUT') {
+      if (me.role !== 'admin') return json({error:'صلاحية مدير مطلوبة'},403);
+      const id = Number(userMatch[1]);
+      const b = await readBody(request);
+      const current = await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
+      if (!current) return json({error:'المستخدم غير موجود'},404);
+      const username = String(b.username ?? current.username).trim();
+      const displayName = String(b.display_name ?? current.display_name).trim();
+      const role = b.role === 'admin' ? 'admin' : 'staff';
+      const active = Number(b.is_active) === 0 ? 0 : 1;
+      if (!username || !displayName) return json({error:'الاسم واسم المستخدم مطلوبان'},400);
+      if (id === Number(me.id) && active === 0) return json({error:'لا يمكنك إيقاف حسابك الحالي'},400);
+      if (String(b.password || '').length > 0 && String(b.password).length < 6) return json({error:'كلمة المرور 6 أحرف على الأقل'},400);
+      if (String(b.password || '').length >= 6) {
+        const hash = await hashPassword(String(b.password));
+        await env.DB.prepare('UPDATE users SET username=?,display_name=?,role=?,is_active=?,password_hash=? WHERE id=?')
+          .bind(username,displayName,role,active,hash,id).run();
+      } else {
+        await env.DB.prepare('UPDATE users SET username=?,display_name=?,role=?,is_active=? WHERE id=?')
+          .bind(username,displayName,role,active,id).run();
+      }
+      await env.DB.prepare('DELETE FROM sessions WHERE user_id=? AND is_active=0').bind(id).run().catch(()=>{});
+      return json({ok:true});
     }
 
     if (path === '/print-batches' && method === 'POST') {
